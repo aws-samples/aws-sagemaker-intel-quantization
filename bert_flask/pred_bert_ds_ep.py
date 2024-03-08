@@ -9,10 +9,12 @@ import shutil
 import flask
 from flask import Flask, jsonify, request
 import glob
-from quantize_with_ds_ep import predict_fn_ep, model_fn_ep, model_fn_ep_fp32
+from quantize_with_ds_ep import predict_fn_ep, model_fn_ep, model_fn_ep_fp32, model_fn_ep_bf16
+import torch
 
 MODEL_PATH = '/opt/ml/model/'
 VERSION_INT8 = "INT8"
+VERSION_BF16 = "BF16"
 # Default context in case it is not supplied as part of the request
 CONTEXT_TEXT = ("The Panthers finished the regular season with a 15-1 record, and quarterback Cam Newton was named the NFL Most Valuable Player (MVP). "
 "They defeated the Arizona Cardinals 49-15 in the NFC Championship Game and advanced to their second Super Bowl appearance since the franchise was founded in 1995."
@@ -28,15 +30,17 @@ class ClassificationService(object):
     def get_model(cls, version):
         if version == VERSION_INT8:
             return model_fn_ep(MODEL_PATH)
+        elif version == VERSION_BF16:
+            return model_fn_ep_bf16(MODEL_PATH)
         else:
             return model_fn_ep_fp32(MODEL_PATH)
 
     @classmethod
     def predict(cls, question, context, version):
         print("*** Predict ***")
-        """For the input, do the predictions and return them."""
+        """For the input, do the predictions and return them."""         
         model_dict = cls.get_model(version)
-        return predict_fn_ep(model_dict, question, context)
+        return predict_fn_ep(model_dict, question, context, use_amp= True if version == "BF16" else False)
 
 # The flask app for serving predictions
 app = flask.Flask(__name__)
