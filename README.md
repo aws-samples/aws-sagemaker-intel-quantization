@@ -69,11 +69,11 @@ Deep learning deployment on the edge for real-time inference is key to many appl
 ```build_and_push.sh <docker image name> ```
 1. Run the docker image as follows and execute the following: 
 ``` sudo docker run --rm -it -p 8080:8080 -p 8081:8081 -p 8082:8082 -p 7070:7070 -p 7071:7071 bert_large_c6i ```
-1. Inside the docker container, execute the following python script to generate both FP32 and INT8 models. (This process may take few minutes depending on the C6i instance size)
+1. Inside the docker container, execute the following python script to generate both FP32, BF16 and INT8 models. (This process may take few minutes depending on the C6i instance size)
 ``` python quantize_with_ds_ep.py ``` 
 1. The above script generate model artifacts required for SageMaker endpoint. In this step we will create and upload the model tar gzip file into AWS S3 bucket.
 
-``` tar -czf both_bert_model.tar.gz model_int8.pt model_fp32.pt tokenizer.json vocab.txt special_tokens_map.json tokenizer_config.json ```
+``` tar -czf both_bert_model.tar.gz model_int8.pt model_bf16.pt model_fp32.pt tokenizer.json vocab.txt special_tokens_map.json tokenizer_config.json ```
 
 ``` aws s3 cp both_bert_model.tar.gz s3://intelc6i ```
 
@@ -108,6 +108,8 @@ aws sagemaker create-endpoint-config --endpoint-config-name c6ibothbert --produc
 1. Check the status of the endpoint to confirm that it is InService. 
 1. To test the FP32 model, execute the following script:
 ``` python invoke-FP32.py ```
+1. To test the BF16 model, execute the following script:
+``` python invoke-BF16.py ```
 1. To test the INT8 model, execute the following script:
 ``` python invoke-INT8.py ```
 1. Validate the response and check the answer. 
