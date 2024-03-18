@@ -7,6 +7,8 @@ import torch
 import intel_extension_for_pytorch as ipex
 from datasets import load_dataset, load_metric
 from torch.utils.data import DataLoader
+from torch.ao.quantization import MinMaxObserver, PerChannelMinMaxObserver, QConfig, QConfigMapping
+
 from tqdm.auto import tqdm
 from transformers import (
     AutoConfig,
@@ -18,8 +20,9 @@ from transformers import (
 )
 
 __MODEL_DICT__ = dict()
+__MODEL_BF16_DICT__ = dict()
 __MODEL_FP32_DICT__ = dict()
-
+__MODEL_NWTEST_DICT__ = dict()
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -149,8 +152,9 @@ def preprare_dataset(args):
     )
     return answer_column_name, eval_examples, eval_dataset, eval_dataloader
 
-def TraceAndSave(args,model,eval_dataloader):
+def TraceAndSave(args,model,eval_dataloader, dtype="fp32"):
     model.eval()
+    model = ipex.optimize(model) if dtype == "fp32" else ipex.optimize(model, dtype=torch.bfloat16)
     # Construct jit inputs based on example tensors
     jit_inputs = []
     example_batch = next(iter(eval_dataloader))
@@ -158,23 +162,29 @@ def TraceAndSave(args,model,eval_dataloader):
         example_tensor = torch.ones_like(example_batch[key])
         jit_inputs.append(example_tensor)
     jit_inputs = tuple(jit_inputs)
-    
+
     with torch.no_grad():
         model = torch.jit.trace(model, jit_inputs, check_trace=False, strict=False)
         model = torch.jit.freeze(model)
-    model.save(os.path.join(args.model_path, "model_fp32.pt"))
-
+    model.save(os.path.join(args.model_path, f"model_{dtype}.pt"))
+    
 def IPEX_quantize(args, model, eval_dataloader):
     model.eval()
-    conf = ipex.quantization.QuantConf(qscheme=torch.per_tensor_affine)
+    qconfig = QConfig(activation=MinMaxObserver.with_args(qscheme=torch.per_tensor_affine,
+                        dtype=torch.quint8),
+                        weight=PerChannelMinMaxObserver.with_args(dtype=torch.qint8,
+                        qscheme=torch.per_channel_symmetric))
     #  Here we use dataset samples for calibations
     print("Doing calibration...")
     for step, batch in enumerate(eval_dataloader):
         print("Calibration step-", step)
         with torch.no_grad():
-            # conf will be updated with observed statistics during calibrating with the dataset
-            with ipex.quantization.calibrate(conf):
-                model(**batch)
+            data = [batch['input_ids'], batch['token_type_ids'], batch['attention_mask']]
+            if step == 0:
+                model = ipex.quantization.prepare(model, qconfig, example_inputs=data, inplace=False)
+            else:
+                # qconfig will be updated with observed statistics during calibrating with the dataset
+                model(*data)
         if step == 5:
             break
     # [Optional] You can save this calibration file for later use
@@ -190,13 +200,16 @@ def IPEX_quantize(args, model, eval_dataloader):
     # Converting Quantization model:
     print("Doing model converting...")
     with torch.no_grad():
-        model = ipex.quantization.convert(model, conf, jit_inputs)
+        model = ipex.quantization.convert(model, jit_inputs)
     # Two iterations to enable fusions
     with torch.no_grad():
-        model(**example_batch)
-        model(**example_batch)
+        traced_model = torch.jit.trace(model, jit_inputs)
+        traced_model = torch.jit.freeze(traced_model)
+        traced_model(*jit_inputs)
+        traced_model(*jit_inputs)
+        
     # Save quantized model
-    model.save(os.path.join(args.model_path, "model_int8.pt"))
+    traced_model.save(os.path.join(args.model_path, "model_int8.pt"))
 
 
 def model_fn(args, eval_dataloader):
@@ -208,8 +221,10 @@ def model_fn(args, eval_dataloader):
         args.model_name_or_path,
         config=config,
     )
-    # to save FP32 model
-    TraceAndSave(args,model,eval_dataloader)
+    # To save FP32 model
+    TraceAndSave(args,model,eval_dataloader,"fp32")
+    # To save BF16 model
+    TraceAndSave(args,model,eval_dataloader,"bf16")
     # To generate the int8 quantized model and then save that next.
     IPEX_quantize(args, model, eval_dataloader)
     # model.save_pretrained(os.path.join(args.model_path, "model.pt"))
@@ -311,11 +326,15 @@ def postprocess_qa_predictions(
         all_predictions[example["id"]] = predictions[0]["text"]
     return all_predictions
 
-
 def model_fn_ep(model_dir):
     global __MODEL_DICT__
     if __MODEL_DICT__: 
         print("Model INT8 already loaded")
+        import subprocess
+        result = subprocess.run(['lscpu'], capture_output=True, text=True)
+        print(result)
+        result = subprocess.run(['uname','-r'], capture_output=True, text=True)
+        print(result)
     else:
         print("Loading Model INT8")
         model_path = os.path.join(model_dir, 'model_int8.pt')    
@@ -325,6 +344,20 @@ def model_fn_ep(model_dir):
         model_dict = {'model': model, 'tokenizer':tokenizer}
         __MODEL_DICT__ = model_dict
     return __MODEL_DICT__
+
+def model_fn_ep_bf16(model_dir):
+    global __MODEL_BF16_DICT__
+    if __MODEL_BF16_DICT__: 
+        print("Model BF16 already loaded")
+    else:
+        print("Loading Model BF16")
+        model_path = os.path.join(model_dir, 'model_bf16.pt')    
+        model_bf16 = torch.jit.load(model_path) 
+        model_bf16 = model_bf16.to('cpu')
+        tokenizer = BertTokenizer.from_pretrained("csarron/bert-base-uncased-squad-v1", use_fast=True)
+        model_bf16_dict = {'model': model_bf16, 'tokenizer':tokenizer}
+        __MODEL_BF16_DICT__ = model_bf16_dict
+    return __MODEL_BF16_DICT__
 
 def model_fn_ep_fp32(model_dir):
     global __MODEL_FP32_DICT__
@@ -340,16 +373,20 @@ def model_fn_ep_fp32(model_dir):
         __MODEL_FP32_DICT__ = model_fp32_dict
     return __MODEL_FP32_DICT__
 
-def predict_fn_ep(model_dict, input_data, context):       
+def predict_fn_ep(model_dict, input_data, context, use_amp):       
     """
     Apply model to the incoming request
     """
 
     tokenizer = model_dict['tokenizer']
     model = model_dict['model']
+    
+    if model == None:
+        return "No Model Loaded"
 
-    encoded_input = tokenizer.encode_plus(input_data, context, return_tensors='pt', max_length=128, padding='max_length', truncation=True)              
-    output=model(**encoded_input) # This is specific to Inferentia
+    encoded_input = tokenizer.encode_plus(input_data, context, return_tensors='pt', max_length=128, padding='max_length', truncation=True)
+    with torch.no_grad(), torch.cpu.amp.autocast(dtype=torch.bfloat16, enabled=use_amp):      
+        output=model(**encoded_input) # This is specific to Inferentia
     answer_text = str(output[0])
 
     answer_start = torch.argmax(output[0])
@@ -359,9 +396,7 @@ def predict_fn_ep(model_dict, input_data, context):
     else:
         answer_text = tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(encoded_input["input_ids"][0][answer_start:]))
 
-    return answer_text;
-  
-
+    return answer_text
 
 def predict_fn(
     args, model, answer_column_name, eval_examples, eval_dataset, eval_dataloader
@@ -447,7 +482,7 @@ def main():
     " They joined the Patriots, Dallas Cowboys, and Pittsburgh Steelers as one of four teams that have made eight appearances in the Super Bowl.")
     question = "Who denied Patriots?"
     #question = "How many appearances have the Denver Broncos made in the Super Bowl?"
-    answer_text = predict_fn_ep(model_dict, question, context)
+    answer_text = predict_fn_ep(model_dict, question, context, False)
     print("Question:", question, "Answer:", answer_text)
 if __name__ == "__main__":
     main()
