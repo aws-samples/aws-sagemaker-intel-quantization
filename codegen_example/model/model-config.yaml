@@ -1,0 +1,30 @@
+# Copyright (C) 2024 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+minWorkers: 1
+maxWorkers: 1
+responseTimeout: 1500
+
+handler:
+    model_name: ""
+    access_token: ""
+    batch_size: 1
+    max_length: 1024
+    max_new_tokens: 128
+    ipex_weight_only_quantization: true
+    woq_dtype: "INT8"
+    lowp_mode: "BF16"
+    act_quant_mode: "PER_IC_BLOCK"
+    group_size: -1
+    token_latency: true
+    benchmark: true 
+    num_warmup: 2
+    num_iter: 8
+    greedy: true
+    
+micro_batching:
+    micro_batch_size: 1
+    parallelism:
+        preprocess: 2
+        inference: 1
+        postprocess: 2

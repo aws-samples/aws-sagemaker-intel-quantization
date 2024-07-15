@@ -14,7 +14,7 @@ question="Who was named the MVP?"
 ###-----------------------------------------------------------------------------
 
 custom_attributes = "c000b4f9-df62-4c85-a0bf-7c525f9104a4"  # An example of a trace ID.
-endpoint_name = "c6ibothbert"                               # Your endpoint name.
+endpoint_name = "bert-intel-inference"                      # Your endpoint name.
 content_type = "application/json"                           # The MIME type of the input data in the request body.
 accept = "*/*"                                              # The desired MIME type of the inference in the response.
 

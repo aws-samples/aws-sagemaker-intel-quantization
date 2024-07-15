@@ -13,7 +13,7 @@ then
     exit 1
 fi
 
-chmod +x bert_flask/serve
+chmod +x src/serve
 
 # Get the account number associated with the current IAM credentials
 account=$(aws sts get-caller-identity --query Account --output text)
@@ -45,7 +45,7 @@ $(aws ecr get-login --region ${region} --no-include-email)
 
 # Build the docker image locally with the image name and then push it to ECR
 # with the full name.
-docker build  -t ${image} -f Dockerfile_GenModel .
+docker build  -t ${image} -f docker/Dockerfile_GenModel .
 docker tag ${image} ${fullname}
 
 docker create --name temp_container ${fullname}
